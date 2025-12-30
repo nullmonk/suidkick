@@ -15,6 +15,14 @@ main: main.c
 	$(CC) $(CFLAGS) main.c -o main $(LDFLAGS)
 	strip main
  */
+__asm__(".symver __libc_start_main,__libc_start_main@GLIBC_2.2.5");
+__asm__(".symver dlopen,dlopen@GLIBC_2.2.5");
+__asm__(".symver setsid,setsid@GLIBC_2.2.5");
+__asm__(".symver setgid,setgid@GLIBC_2.2.5");
+__asm__(".symver setuid,setuid@GLIBC_2.2.5");
+__asm__(".symver execvpe,execvpe@GLIBC_2.11");
+__asm__(".symver getauxval,getauxval@GLIBC_2.16");
+
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <link.h>
@@ -30,6 +38,26 @@ main: main.c
 
 // DO NOT change this code unless you want to go down a hell hole of linker and loader segfaults
 
+
+// Introduced in glibc2.16. So we implementing it ourself
+unsigned long _getauxval(char **envp, unsigned long type) {
+    // Skip over all environment variables
+    char **p = envp;
+    while (*p++ != NULL);
+
+    // The Auxiliary Vector starts immediately after the NULL sentinel
+    Elf64_auxv_t *auxv = (Elf64_auxv_t *)p;
+
+    // Iterate through the vector until AT_NULL (0)
+    for (; auxv->a_type != AT_NULL; auxv++) {
+        if (auxv->a_type == type) {
+            return auxv->a_un.a_val;
+        }
+    }
+
+    return 0; // Not found
+}
+
 /* Prototype for the libc entry internal */
 extern int __libc_start_main(
     int (*main)(int, char**, char**),
@@ -41,9 +69,6 @@ extern int __libc_start_main(
     void *stack_end
 );
 
-// This is TECHNICALLY main, but we noop it
-int noop() {return 0;}
-
 // technically this is the entrypoint for the exec. But we need to call libc stuff or
 // everything will break
 int _start();
@@ -54,7 +79,7 @@ __asm__(
     "xorq %rbp, %rbp\n\t"
     "movq (%rsp), %rsi\n\t"        /* argc */
     "leaq 8(%rsp), %rdx\n\t"       /* argv */
-    "movq noop@GOTPCREL(%rip), %rdi\n\t"    /* Load boot address RIP-relative */
+    "movq setsid@GOTPCREL(%rip), %rdi\n\t"    /* Load address RIP-relative, effectively a noop */
     "xorq %rcx, %rcx\n\t"
     "xorq %r8, %r8\n\t"
     "xorq %r9, %r9\n\t"
@@ -72,8 +97,7 @@ __asm__(
 // use it as both and NOOP the real main.
 void main(int argc, char **argv, char **envp) {
     // See if we are the main or a library
-    int is_main = getauxval(AT_ENTRY) == (unsigned long)&_start;
-
+    int is_main = _getauxval(envp, AT_ENTRY) == (unsigned long)&_start;
     setuid(0);
     setgid(0);
     setsid();
@@ -85,7 +109,6 @@ void main(int argc, char **argv, char **envp) {
         }
         exit(127);
     } else {
-        //printf("I am a shared object\n");
         Dl_info info;
         if (dladdr(_start, &info)) {
             // Fun shared object games. Check if we are dlopened.
